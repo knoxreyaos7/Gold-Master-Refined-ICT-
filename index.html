@@ -4607,21 +4607,32 @@ const replay = {
       // epoch-gated debounce counts each candle as exactly 1 tick, not 4.
       pos._curEpoch = candle.epoch;
 
+      // Track the best price reached so far within this candle's path.
+      // The trailing SL must only advance on FAVORABLE moves (high-water for BUY,
+      // low-water for SELL). Using each raw path step for trail calculation caused
+      // the SL to be evaluated against low/spike steps — correctly ratcheted to
+      // not move backward, but still checked against those same adverse prices
+      // immediately after, closing trades that should have kept running.
+      // Fix: update trail using the favorable high/low watermark, but check
+      // SL/TP hits against the actual raw path price.
+      let pathHigh = candle.open;
+      let pathLow  = candle.open;
+
       for (const price of path) {
         if (closed) break;
 
-        // ── THREE-PHASE TRAIL (incremental) ───────────────────────────────
-        // Pass the actual path price to updateThreePhaseTrail so BE/trail only
-        // activates when price genuinely reaches the threshold.
-        // The ratchet inside updateThreePhaseTrail (Math.max/Math.min on newSL)
-        // already guarantees the SL only ever moves favourably — no external
-        // clamping needed here. The old Math.max(price, candle.open) was causing
-        // false BE locks: on the LOW step of a bull candle the open was fed in
-        // instead of the actual low, inflating pctToTP and triggering BE early.
+        // Advance watermarks as path progresses
+        if (price > pathHigh) pathHigh = price;
+        if (price < pathLow)  pathLow  = price;
+
+        // ── THREE-PHASE TRAIL: advance using the favorable watermark ─────
+        // BUY trail uses pathHigh (only rises); SELL trail uses pathLow (only falls).
+        // This prevents the trail SL from being set using a mid-candle dip/spike
+        // price, which would place it at the wrong level when the SL-hit check runs.
         if (CFG.TRAIL_ENABLED) {
-          const trail = updateThreePhaseTrail(pos, price);
+          const trailPrice = isBuy ? pathHigh : pathLow;
+          const trail = updateThreePhaseTrail(pos, trailPrice);
           if (trail) {
-            // Always sync display flags regardless of whether SL price changed
             if(trail.phase >= 1) pos.beTriggered = true;
             if(trail.phase >= 2) pos.trailActive = true;
             if(trail.newSL !== pos.slPrice) {
@@ -4632,7 +4643,7 @@ const replay = {
           }
         }
 
-        // ── SL then TP at this price step (pessimistic ordering) ──────────
+        // ── SL then TP hit check against the raw path price ──────────────
         if (isBuy) {
           if (price <= pos.slPrice) {
             const pnl = (pos.trailPhase || 0) >= 1
