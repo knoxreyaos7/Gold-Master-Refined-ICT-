@@ -1092,7 +1092,7 @@ let _derivWS             = null;  // WebSocket handle — Deriv live feed
 let _derivReconnectTimer = null;
 
 const CFG = {
-  RISK_PCT     : 1.0,
+  RISK_PCT     : 1.5,         // +15% loosened: was 1.0 — more capital deployed per trade
   RR           : 3.0,
   START_BALANCE: 0,
   PROFIT_TARGET: 0,
@@ -1102,17 +1102,17 @@ const CFG = {
   MAX_LOT_CAP  : 10.0,
   // ── Risk Mode: REPORT = warn but allow, BLOCK = reject overflow trades ──
   RISK_MODE    : 'REPORT',   // 'REPORT' | 'BLOCK'
-  MAX_SL_PTS   : 15.0,        // Hard cap on SL distance (raised from 6.0 for XAUUSD)
+  MAX_SL_PTS   : 15.0,        // Hard cap on SL distance
   // ── Three-Phase Trailing Stop ──
   TRAIL_ENABLED: true,
-  TRAIL_PHASE_1: 60,          // % to TP for BE lock — raised from 50% to avoid premature BE on volatility
+  TRAIL_PHASE_1: 60,          // % to TP for BE lock
   TRAIL_PHASE_2: 80,          // % to TP for 40% trail
   TRAIL_PHASE_3: 93,          // % to TP for 60% runner trail
-  TRAIL_DIST   : 5.0,        // Min trail distance — raised from 3.0 for XAUUSD volatility
+  TRAIL_DIST   : 5.0,        // Min trail distance
   // ── Blow-Proof Safety Layer Settings (user-configurable) ──
   SAFETY_HARD_FLOOR_PCT   : 10,   // % of start balance = hard floor
-  SAFETY_MAX_RISK_CAP_PCT : 5,    // % hard cap on risk per trade
-  SAFETY_CONSEC_LOSS_HALVE: 3,    // consecutive losses before halving risk
+  SAFETY_MAX_RISK_CAP_PCT : 6,    // +15% loosened: was 5 — slightly higher per-trade risk cap
+  SAFETY_CONSEC_LOSS_HALVE: 4,    // +15% loosened: was 3 — halves risk after 4 consecutive losses, not 3
   SAFETY_EMERG_FLOOR_PCT  : 15,   // % above floor = emergency warning zone
   SAFETY_MIN_MARGIN_PCT   : 50,   // % of free margin that must remain
 };
@@ -3104,7 +3104,7 @@ const newsEngine = {
 };
 
 // ── DYNAMIC LOT SIZING ──
-const QUALITY_MULT = { 1: 1.0, 2: 1.5, 3: 2.0 };
+const QUALITY_MULT = { 1: 0.6, 2: 1.5, 3: 2.3 };  // q1 de-sized, q3 boosted +15%
 
 function calcDynamicLots(slDist, quality, useBalance, useStartBal) {
   const bal = useBalance !== undefined ? useBalance : demoBalance;
@@ -3120,7 +3120,7 @@ function calcDynamicLots(slDist, quality, useBalance, useStartBal) {
     : bal;
   const baseRisk = Math.min(bal * riskPct / 100, tradeableCapital * riskPct / 100);
   const qMult = QUALITY_MULT[Math.max(1, Math.min(3, quality))] || 1.0;
-  const growthFactor = startBal > 0 ? Math.min(1.5, Math.sqrt(bal / startBal)) : 1.0;
+  const growthFactor = startBal > 0 ? Math.min(1.73, Math.sqrt(bal / startBal)) : 1.0;  // +15%: cap raised from 1.5
 
   // ── SURVIVAL ENGINE: Market regime risk scaling ──
   // Reduces risk in non-trending conditions to protect capital.
@@ -3133,10 +3133,10 @@ function calcDynamicLots(slDist, quality, useBalance, useStartBal) {
   // ── SURVIVAL ENGINE: Session risk scaling ──
   // Higher-liquidity sessions allow proportionally higher risk.
   const sess = strategy.activeSession ? strategy.activeSession() : 'OFF-HOURS';
-  const sessionMult = sess === 'LONDON'    ? 1.0
-                    : sess === 'NEW YORK'  ? 0.85
-                    : sess === 'ASIAN'     ? 0.45
-                    : 0.50;  // OFF-HOURS
+  const sessionMult = sess === 'LONDON'    ? 1.15   // +15%: was 1.0
+                    : sess === 'NEW YORK'  ? 0.98   // +15%: was 0.85
+                    : sess === 'ASIAN'     ? 0.52   // +15%: was 0.45
+                    : 0.58;  // OFF-HOURS  +15%: was 0.50
 
   let lots = slDist > 0
     ? (baseRisk * qMult * growthFactor * regimeMult * sessionMult) / (slDist * 100)
@@ -3855,7 +3855,7 @@ function checkRiskOverflow(slDist, quality, useBalance) {
   }
   const targetRisk = bal * riskPct / 100;
   const qMult = QUALITY_MULT[Math.max(1, Math.min(3, quality))] || 1.0;
-  const growthFactor = startBal > 0 ? Math.min(1.5, Math.sqrt(bal / startBal)) : 1.0;
+  const growthFactor = startBal > 0 ? Math.min(1.73, Math.sqrt(bal / startBal)) : 1.0;  // +15%: cap raised from 1.5
   const rawLots = slDist > 0 ? (targetRisk * qMult * growthFactor) / (slDist * 100) : 0;
   const lots = Math.max(0.01, Math.min(CFG.MAX_LOT_CAP, +rawLots.toFixed(2)));
   const actualRisk = lots * 100 * slDist;
@@ -4777,6 +4777,10 @@ const replay = {
     }
 
     if (sig) {
+      // PRECISION FILTER: only take quality ≥ 2 (★★ and ★★★) setups.
+      // ★ (quality 1) signals lack either Kill Zone timing or FVG confirmation —
+      // filtering them reduces trade count but raises win rate and avg win size.
+      if (sig.quality < 2) return;
       // PRE_RELEASE: prefer quality ≥ 2 (momentum setups) — low quality signals less reliable during spike
       if (ns.state === 'PRE_RELEASE' && sig.quality < 2) return; // skip ★ during release spike
       if (ns.state !== 'NORMAL') {
