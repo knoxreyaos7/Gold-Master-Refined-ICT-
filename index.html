@@ -1455,12 +1455,12 @@ function detectMarketRegime() {
 // M5 = Narrative / Bias (Sweep)  |  M1 = Precision Execution (all other steps)
 
 const STRAT_CFG = {
-  ENTRY_MIN:                   0.10,   // 10% of OB from bottom (widened from 20%)
-  ENTRY_MAX:                   0.70,   // 70% of OB from bottom (widened from 50%)
-  MIN_DISPLACEMENT_MULTIPLIER: 1.0,    // displacement range ≥ 1.0× ATR (loosened from 1.5×)
-  MIN_BODY_RATIO:              0.55,   // displacement body ≥ 55% of range (loosened from 70%)
-  MIN_STRUCTURE_CANDLES:       12,     // lookback for BMS structure high/low
-  MIN_BMS_CLOSE_STRENGTH:      0.55,   // BMS candle must close ≥ 55% into range (loosened from 70%)
+  ENTRY_MIN:                   0.05,   // ↓30% — entry zone floor (was 0.10)
+  ENTRY_MAX:                   0.91,   // ↑30% — entry zone ceiling (was 0.70)
+  MIN_DISPLACEMENT_MULTIPLIER: 0.70,   // ↓30% — displacement range ≥ 0.70× ATR (was 1.0×)
+  MIN_BODY_RATIO:              0.38,   // ↓30% — displacement body ≥ 38% of range (was 0.55)
+  MIN_STRUCTURE_CANDLES:       8,      // ↓30% — BMS lookback candles (was 12)
+  MIN_BMS_CLOSE_STRENGTH:      0.38,   // ↓30% — BMS close strength (was 0.55)
   ATR_PERIOD:                  14,
 };
 
@@ -1536,7 +1536,7 @@ const strategy = {
   _detectLiquiditySweep() {
     const arr = candles[300]; // M5 for narrative
     if (!arr || arr.length < 20) return null;
-    const recent  = arr.slice(-20);
+    const recent  = arr.slice(-26); // ↑30% lookback — was -20
     const current = recent[recent.length - 1];
     const prev    = recent.slice(0, -1);
     const highest = Math.max(...prev.map(c => c.high));
@@ -1616,7 +1616,7 @@ const strategy = {
   _detectOrderBlock(arr, bms) {
     if (!bms || !arr || arr.length < 6) return null;
     if (bms.type === 'BULLISH_BMS') {
-      for (let i = arr.length - 6; i >= 0; i--) {
+      for (let i = arr.length - 9; i >= 0; i--) { // ↑30% scan depth (was -6)
         const c = arr[i];
         if (c.close < c.open) { // bearish candle → bullish OB
           return { type: 'BULLISH_OB', high: c.high, low: c.low, candle: c };
@@ -1624,7 +1624,7 @@ const strategy = {
       }
     }
     if (bms.type === 'BEARISH_BMS') {
-      for (let i = arr.length - 6; i >= 0; i--) {
+      for (let i = arr.length - 9; i >= 0; i--) { // ↑30% scan depth (was -6)
         const c = arr[i];
         if (c.close > c.open) { // bullish candle → bearish OB
           return { type: 'BEARISH_OB', high: c.high, low: c.low, candle: c };
@@ -1643,7 +1643,7 @@ const strategy = {
   // ═══════════════════════════════════════════════════════════════════
   _detectImbalance(arr) {
     if (!arr || arr.length < 3) return null;
-    for (let i = arr.length - 3; i >= 2; i--) {
+    for (let i = arr.length - 3; i >= 1; i--) { // ↑30% scan range (was i >= 2)
       const c1 = arr[i - 2], c2 = arr[i - 1], c3 = arr[i];
       if (c1.high < c3.low && c2.close > c2.open) {
         return { type: 'BULLISH_IMBALANCE', high: c3.low, low: c1.high,
@@ -1916,13 +1916,13 @@ const strategy = {
     if (!c) return false;
     const body = Math.abs(c.close - c.open);
     const tot  = c.high - c.low;
-    return c.close > c.open && tot > 0 && (body / tot) >= 0.65;
+    return c.close > c.open && tot > 0 && (body / tot) >= 0.45; // ↓30% (was 0.65)
   },
   bearishDisplacement(c) {
     if (!c) return false;
     const body = Math.abs(c.close - c.open);
     const tot  = c.high - c.low;
-    return c.close < c.open && tot > 0 && (body / tot) >= 0.65;
+    return c.close < c.open && tot > 0 && (body / tot) >= 0.45; // ↓30% (was 0.65)
   },
   displacementStrength(c) {
     if (!c) return 0;
@@ -4149,8 +4149,8 @@ function runStrategy() {
   }
 
   // ── SWEEP EPOCH DEDUPLICATION (20-min cooldown + ±0.3 pt price tolerance) ──
-  const COOLDOWN   = 5 * 60 * 1000;   // 5-min cooldown (loosened from 20 min)
-  const PRICE_TOL  = 0.3;
+  const COOLDOWN   = 3.5 * 60 * 1000; // ↓30% cooldown — was 5 min
+  const PRICE_TOL  = 0.21;            // ↓30% dedup tolerance — was 0.3
 
   const isBullDup = bs.sweepEpoch !== undefined && (
     (now - lastTradedBullSweepEpoch < COOLDOWN) ||
