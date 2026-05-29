@@ -4591,14 +4591,15 @@ const replay = {
         if (closed) break;
 
         // ── THREE-PHASE TRAIL (incremental) ───────────────────────────────
-        // Advance the high-water only to the price reached so far in the path.
-        // For buys:  favorable direction is up  → Math.max keeps water rising.
-        // For sells: favorable direction is down → Math.min keeps water falling.
+        // Pass the actual path price to updateThreePhaseTrail so BE/trail only
+        // activates when price genuinely reaches the threshold.
+        // The ratchet inside updateThreePhaseTrail (Math.max/Math.min on newSL)
+        // already guarantees the SL only ever moves favourably — no external
+        // clamping needed here. The old Math.max(price, candle.open) was causing
+        // false BE locks: on the LOW step of a bull candle the open was fed in
+        // instead of the actual low, inflating pctToTP and triggering BE early.
         if (CFG.TRAIL_ENABLED) {
-          const trailPrice = isBuy
-            ? Math.max(price, candle.open)
-            : Math.min(price, candle.open);
-          const trail = updateThreePhaseTrail(pos, trailPrice);
+          const trail = updateThreePhaseTrail(pos, price);
           if (trail) {
             // Always sync display flags regardless of whether SL price changed
             if(trail.phase >= 1) pos.beTriggered = true;
