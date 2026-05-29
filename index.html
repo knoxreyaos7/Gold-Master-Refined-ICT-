@@ -3275,11 +3275,24 @@ function updateThreePhaseTrail(pos, currentPrice) {
   let phase = pos.trailPhase || 0;
   let trailInfo = '';
 
-  // ── BE LOCK DEBOUNCE: require price to sustain at trigger level ──
-  // Prevents false BE locks from single-tick spikes that immediately retrace.
-  // pos._beLockTicks tracks consecutive ticks at/above the trigger threshold.
-  if(!pos._beLockTicks) pos._beLockTicks = 0;
-  if(!pos._beLockTriggered) pos._beLockTriggered = false;
+  // ── BE LOCK DEBOUNCE: require price to sustain at trigger level across 2
+  //    distinct candle epochs before the BE lock activates.
+  //
+  //    Previous bug: _beLockTicks was incremented on every function call.
+  //    In backtest, _checkReplayPositions walks 4 path-steps per candle
+  //    (open→low→high→close), so two qualifying steps within ONE bar satisfied
+  //    "2 ticks" and fired BE far too early.
+  //    Additionally, _beLockTriggered bypassed the counter entirely after first
+  //    activation — making BE fire instantly on every subsequent candle.
+  //
+  //    Fix: gate each increment by a unique candle epoch (_beLockEpoch) so
+  //    multiple path-steps from the same bar only count as 1. Removed the
+  //    _beLockTriggered bypass — phase >= 1 already persists the lock.
+  //    In live mode pos._curEpoch is not set, so Date.now() gives a unique
+  //    value on every real tick, preserving the original live behaviour.
+  if (!pos._beLockTicks) pos._beLockTicks = 0;
+  if (!pos._beLockEpoch) pos._beLockEpoch = 0;
+  const _nowEpoch = pos._curEpoch || Date.now();
 
   // ── Evaluate highest phase first so a fast-moving price jumps directly ──
 
@@ -3299,12 +3312,14 @@ function updateThreePhaseTrail(pos, currentPrice) {
     phase = 2;
     trailInfo = `PROT @ ${CFG.TRAIL_PHASE_2}% — 40% trail → ${newSL.toFixed(2)}`;
   }
-  // Phase 1: Break-even lock with debounce and proportional distance
+  // Phase 1: Break-even lock — requires qualifying price on 2 distinct candles
   else if(pctToTP >= CFG.TRAIL_PHASE_1 && phase < 1) {
-    // Debounce: require 2 consecutive ticks at/above trigger before activating
-    pos._beLockTicks++;
-    if(pos._beLockTicks >= 2 || pos._beLockTriggered) {
-      pos._beLockTriggered = true;
+    // Advance counter only once per unique candle epoch
+    if (_nowEpoch !== pos._beLockEpoch) {
+      pos._beLockEpoch = _nowEpoch;
+      pos._beLockTicks++;
+    }
+    if (pos._beLockTicks >= 2) {
       // BE lock distance: proportional to total move (min 15%) or TRAIL_DIST, whichever is larger
       // This gives more breathing room for volatile pairs like XAUUSD
       const beDist = Math.max(CFG.TRAIL_DIST, totalMove * 0.15);
@@ -3313,8 +3328,9 @@ function updateThreePhaseTrail(pos, currentPrice) {
       trailInfo = `BE LOCK @ ${CFG.TRAIL_PHASE_1}% — SL → ${newSL.toFixed(2)} (dist:${beDist.toFixed(1)}pts)`;
     }
   } else if(pctToTP < CFG.TRAIL_PHASE_1 && phase < 1) {
-    // Reset debounce counter if price drops below threshold before BE lock activates
+    // Reset debounce if price retreats below the threshold before lock activates
     pos._beLockTicks = 0;
+    pos._beLockEpoch = 0;
   }
 
   // Continuous trailing for phase 2 & 3 (ratchet — only moves favourably)
@@ -4586,6 +4602,10 @@ const replay = {
     this.positions.forEach(pos => {
       let closed = null;
       const isBuy = pos.dir === 'UP';
+
+      // Stamp current candle epoch on the position so updateThreePhaseTrail's
+      // epoch-gated debounce counts each candle as exactly 1 tick, not 4.
+      pos._curEpoch = candle.epoch;
 
       for (const price of path) {
         if (closed) break;
