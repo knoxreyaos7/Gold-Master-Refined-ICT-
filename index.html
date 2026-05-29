@@ -1534,21 +1534,27 @@ const strategy = {
   //  Buy-Side Sweep  → anticipate SELL delivery
   // ═══════════════════════════════════════════════════════════════════
   _detectLiquiditySweep() {
-    const arr = candles[300]; // M5 for narrative
-    if (!arr || arr.length < 20) return null;
-    const recent  = arr.slice(-26); // ↑30% lookback — was -20
-    const current = recent[recent.length - 1];
-    const prev    = recent.slice(0, -1);
-    const highest = Math.max(...prev.map(c => c.high));
-    const lowest  = Math.min(...prev.map(c => c.low));
-
-    // Sell-side sweep: low wick below prior lows, close reclaimed
-    if (current.low < lowest && current.close > lowest) {
-      return { type: 'SELL_SIDE_SWEEP', level: lowest, candle: current };
-    }
-    // Buy-side sweep: high wick above prior highs, close reclaimed
-    if (current.high > highest && current.close < highest) {
-      return { type: 'BUY_SIDE_SWEEP', level: highest, candle: current };
+    // ── FIX: use only COMPLETED M5 bars — the forming bar has no confirmed wick.
+    // Scan the 5 most recent completed bars (~25 min) for a fresh sweep event.
+    const arr = candles[300];
+    const completed = (arr && arr.length > 1) ? arr.slice(0, -1) : arr;
+    if (!completed || completed.length < 20) return null;
+    for (let offset = 0; offset < 5; offset++) {
+      const idx = completed.length - 1 - offset;
+      if (idx < 20) break;
+      const current = completed[idx];
+      const prev    = completed.slice(Math.max(0, idx - 25), idx);
+      if (!prev.length) break;
+      const highest = Math.max(...prev.map(c => c.high));
+      const lowest  = Math.min(...prev.map(c => c.low));
+      // Sell-side sweep: wick below prior lows, closed back inside
+      if (current.low < lowest && current.close > lowest) {
+        return { type: 'SELL_SIDE_SWEEP', level: lowest, candle: current };
+      }
+      // Buy-side sweep: wick above prior highs, closed back inside
+      if (current.high > highest && current.close < highest) {
+        return { type: 'BUY_SIDE_SWEEP', level: highest, candle: current };
+      }
     }
     return null;
   },
@@ -1743,8 +1749,14 @@ const strategy = {
     const sweep = this._detectLiquiditySweep();
     const g1    = !!(sweep && sweep.type === 'SELL_SIDE_SWEEP');
 
-    const m1   = candles[60];
-    const disp = m1 ? this._detectDisplacement(m1) : null;
+    // ── FIX: use COMPLETED M1 bars for structure detection (displacement, BMS, OB).
+    // The forming bar cannot simultaneously show a BMS (price above prior highs)
+    // AND be inside the OB entry zone — those two states are mutually exclusive.
+    // Using completed bars lets displacement/BMS fire on bar close, then on the
+    // NEXT bar(s) the zone check (G6) triggers when price retraces into the OB.
+    const m1raw = candles[60];
+    const m1    = (m1raw && m1raw.length > 1) ? m1raw.slice(0, -1) : m1raw;
+    const disp = (m1 && m1.length >= 2) ? this._detectDisplacement(m1) : null;
     const g2   = !!(disp && disp.direction === 'BULLISH');
 
     const bms  = g2 ? this._detectTrueBMS(m1, disp) : null;
@@ -1756,6 +1768,7 @@ const strategy = {
     const imb  = g4 ? this._detectImbalance(m1) : null;
     const g5   = !!(imb && imb.type === 'BULLISH_IMBALANCE');
 
+    // G6 uses live `price` — checks if current tick has retraced into the OB zone
     const zone = (g4 && ob) ? this._entryZone(ob, true) : null;
     const g6   = !!(zone && price >= zone.min && price <= zone.max);
 
@@ -1813,8 +1826,10 @@ const strategy = {
     const sweep = this._detectLiquiditySweep();
     const g1    = !!(sweep && sweep.type === 'BUY_SIDE_SWEEP');
 
-    const m1   = candles[60];
-    const disp = m1 ? this._detectDisplacement(m1) : null;
+    // ── FIX: same as evalBuy — use completed M1 bars for structure, live price for zone
+    const m1raw = candles[60];
+    const m1    = (m1raw && m1raw.length > 1) ? m1raw.slice(0, -1) : m1raw;
+    const disp = (m1 && m1.length >= 2) ? this._detectDisplacement(m1) : null;
     const g2   = !!(disp && disp.direction === 'BEARISH');
 
     const bms  = g2 ? this._detectTrueBMS(m1, disp) : null;
@@ -1826,6 +1841,7 @@ const strategy = {
     const imb  = g4 ? this._detectImbalance(m1) : null;
     const g5   = !!(imb && imb.type === 'BEARISH_IMBALANCE');
 
+    // G6 uses live `price` — checks if current tick has retraced into the OB zone
     const zone = (g4 && ob) ? this._entryZone(ob, false) : null;
     const g6   = !!(zone && price >= zone.min && price <= zone.max);
 
