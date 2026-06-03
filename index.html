@@ -1455,12 +1455,13 @@ function detectMarketRegime() {
 // M5 = Narrative / Bias (Sweep)  |  M1 = Precision Execution (all other steps)
 
 const STRAT_CFG = {
-  ENTRY_MIN:                   0.04,   // ↓40% — entry zone floor (was 0.10)
-  ENTRY_MAX:                   0.97,   // ↑40% — entry zone ceiling (was 0.70)
-  MIN_DISPLACEMENT_MULTIPLIER: 0.63,   // ↓40% — displacement range ≥ 0.63× ATR (was 1.0×)
-  MIN_BODY_RATIO:              0.34,   // ↓40% — displacement body ≥ 34% of range (was 0.55)
-  MIN_STRUCTURE_CANDLES:       7,      // ↓40% — BMS lookback candles (was 12)
-  MIN_BMS_CLOSE_STRENGTH:      0.34,   // ↓40% — BMS close strength (was 0.55)
+  ENTRY_MIN:                   0.01,   // ultra-wide entry zone floor
+  ENTRY_MAX:                   0.99,   // ultra-wide entry zone ceiling
+  MIN_DISPLACEMENT_MULTIPLIER: 0.35,   // loosened — displacement range ≥ 0.35× ATR (was 0.63×)
+  MIN_BODY_RATIO:              0.20,   // loosened — displacement body ≥ 20% of range (was 0.34)
+  MIN_STRUCTURE_CANDLES:       5,      // loosened — BMS lookback candles (was 7)
+  MIN_BMS_CLOSE_STRENGTH:      0.15,   // loosened — BMS close strength (was 0.34)
+  DISPLACEMENT_SCAN_BARS:      6,      // NEW — scan last 6 M1 bars for displacement (was 1)
   ATR_PERIOD:                  14,
 };
 
@@ -1539,7 +1540,7 @@ const strategy = {
     const arr = candles[300];
     const completed = (arr && arr.length > 1) ? arr.slice(0, -1) : arr;
     if (!completed || completed.length < 20) return null;
-    for (let offset = 0; offset < 7; offset++) {  // ↑40% — was 5 bars (~25 min)
+    for (let offset = 0; offset < 12; offset++) {  // expanded — scan 12 completed M5 bars (~60 min)
       const idx = completed.length - 1 - offset;
       if (idx < 20) break;
       const current = completed[idx];
@@ -1547,12 +1548,13 @@ const strategy = {
       if (!prev.length) break;
       const highest = Math.max(...prev.map(c => c.high));
       const lowest  = Math.min(...prev.map(c => c.low));
-      // Sell-side sweep: wick below prior lows, closed back inside
-      if (current.low < lowest && current.close > lowest) {
+      const tolerance = (current.high - current.low) * 0.20; // allow close within 20% of wick from sweep level
+      // Sell-side sweep: wick below prior lows, closed at or back inside
+      if (current.low < lowest && current.close > lowest - tolerance) {
         return { type: 'SELL_SIDE_SWEEP', level: lowest, candle: current };
       }
-      // Buy-side sweep: wick above prior highs, closed back inside
-      if (current.high > highest && current.close < highest) {
+      // Buy-side sweep: wick above prior highs, closed at or back inside
+      if (current.high > highest && current.close < highest + tolerance) {
         return { type: 'BUY_SIDE_SWEEP', level: highest, candle: current };
       }
     }
@@ -1566,19 +1568,27 @@ const strategy = {
   // ═══════════════════════════════════════════════════════════════════
   _detectDisplacement(arr) {
     if (!arr || arr.length < 2) return null;
-    const current    = arr[arr.length - 1];
     const currentATR = this._atr(arr);
-    const range      = current.high - current.low;
-    const body       = Math.abs(current.close - current.open);
-    const ratio      = range === 0 ? 0 : body / range;
-    if (range >= currentATR * STRAT_CFG.MIN_DISPLACEMENT_MULTIPLIER &&
-        ratio >= STRAT_CFG.MIN_BODY_RATIO) {
-      return {
-        direction: current.close > current.open ? 'BULLISH' : 'BEARISH',
-        candle: current,
-        range,
-        ratio,
-      };
+    const scanBars = STRAT_CFG.DISPLACEMENT_SCAN_BARS || 6;
+    // Scan last N bars — not just the most recent one.
+    // This lets the chain fire even when displacement happened a few bars ago.
+    for (let back = 0; back < scanBars; back++) {
+      const idx = arr.length - 1 - back;
+      if (idx < 1) break;
+      const current = arr[idx];
+      const range   = current.high - current.low;
+      const body    = Math.abs(current.close - current.open);
+      const ratio   = range === 0 ? 0 : body / range;
+      if (range >= currentATR * STRAT_CFG.MIN_DISPLACEMENT_MULTIPLIER &&
+          ratio >= STRAT_CFG.MIN_BODY_RATIO) {
+        return {
+          direction: current.close > current.open ? 'BULLISH' : 'BEARISH',
+          candle: current,
+          candleIdx: idx,  // index in arr — used by _detectTrueBMS
+          range,
+          ratio,
+        };
+      }
     }
     return null;
   },
@@ -1591,19 +1601,25 @@ const strategy = {
   // ═══════════════════════════════════════════════════════════════════
   _detectTrueBMS(arr, displacement) {
     if (!displacement || !arr || arr.length < STRAT_CFG.MIN_STRUCTURE_CANDLES) return null;
-    const recent  = arr.slice(-STRAT_CFG.MIN_STRUCTURE_CANDLES);
-    const current = recent[recent.length - 1];
-    const rangeH  = current.high - current.low || 1;
+    // Use the actual displacement candle (could be up to DISPLACEMENT_SCAN_BARS ago)
+    const current  = displacement.candle;
+    const dispIdx  = displacement.candleIdx !== undefined ? displacement.candleIdx : arr.length - 1;
+    const rangeH   = current.high - current.low || 1;
+
+    // Look at bars strictly BEFORE the displacement candle for the swing reference
+    const lookbackStart = Math.max(0, dispIdx - STRAT_CFG.MIN_STRUCTURE_CANDLES);
+    const recent = arr.slice(lookbackStart, dispIdx);
+    if (!recent.length) return null;
 
     if (displacement.direction === 'BULLISH') {
-      const significantHigh = Math.max(...recent.slice(0, -1).map(c => c.high));
+      const significantHigh = Math.max(...recent.map(c => c.high));
       const closeStrength   = (current.close - current.low) / rangeH;
       if (current.close > significantHigh && closeStrength >= STRAT_CFG.MIN_BMS_CLOSE_STRENGTH) {
         return { type: 'BULLISH_BMS', brokenLevel: significantHigh, candle: current };
       }
     }
     if (displacement.direction === 'BEARISH') {
-      const significantLow = Math.min(...recent.slice(0, -1).map(c => c.low));
+      const significantLow = Math.min(...recent.map(c => c.low));
       const closeStrength  = (current.high - current.close) / rangeH;
       if (current.close < significantLow && closeStrength >= STRAT_CFG.MIN_BMS_CLOSE_STRENGTH) {
         return { type: 'BEARISH_BMS', brokenLevel: significantLow, candle: current };
@@ -4181,8 +4197,8 @@ function runStrategy() {
   }
 
   // ── SWEEP EPOCH DEDUPLICATION (20-min cooldown + ±0.3 pt price tolerance) ──
-  const COOLDOWN   = 3.5 * 60 * 1000; // ↓30% cooldown — was 5 min
-  const PRICE_TOL  = 0.21;            // ↓30% dedup tolerance — was 0.3
+  const COOLDOWN   = 1.5 * 60 * 1000; // 90s cooldown (was 3.5 min)
+  const PRICE_TOL  = 0.10;            // tighter dedup price tolerance (was 0.21)
 
   const isBullDup = bs.sweepEpoch !== undefined && (
     (now - lastTradedBullSweepEpoch < COOLDOWN) ||
@@ -5855,7 +5871,7 @@ setInterval(() => {
 
 addSignal('info','XAUUSD PA Bot v2 — Deriv WebSocket data engine ready',null);
 
-addSignal('info','Strategy: Elite ICT/SMC Delivery Engine — M5 Liquidity Sweep → M1 True BMS → M1 Displacement → M1 OB → M1 FVG (optional) → 10-70% Mean Threshold | SL=Sweep Candle | Loosened Filters v2',null);
+addSignal('info','Strategy: Elite ICT/SMC Delivery Engine — M5 Liquidity Sweep (12-bar) → M1 True BMS (6-bar disp scan) → M1 Displacement → M1 OB → M1 FVG (optional) → 1-99% Mean Threshold | SL=Sweep Candle | Loosened Filters v3',null);
 </script>
 </body>
 </html>
